@@ -2,28 +2,25 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Milestone 2 — Site Sourcing Agent</title>
+    <title>Milestone 3 — Site Sourcing Agent</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <!-- Your styles -->
     <link rel="stylesheet" href="styles.css" />
 
     <!-- React + ReactDOM (UMD) -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script defer crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script defer crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 
-    <!-- React Flow CSS + UMD (use jsDelivr to avoid unpkg 404/CORS) -->
+    <!-- React Flow CSS + UMD -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reactflow@11.10.4/dist/style.css" />
-    <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/reactflow@11.10.4/dist/umd/index.min.js"></script>
+    <script defer crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/reactflow@11.10.4/dist/umd/index.min.js"></script>
 
-    <!-- Dagre for auto-layout -->
-    <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+    <!-- Dagre UMD -->
+    <script defer src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
   </head>
-
   <body>
     <div id="app"></div>
-
     <!-- Your app code (cache-busted) -->
-    <script src="app.js?v=11"></script>
+    <script defer src="app.js?v=13"></script>
   </body>
 </html>

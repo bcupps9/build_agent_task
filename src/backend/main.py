@@ -1,15 +1,24 @@
-# backend/main.py
 import asyncio
 import json
 import threading
 import time
-from typing import Any, Dict, List, Tuple, TypedDict, Callable
+from typing import Any, Dict, List, TypedDict
 
 from langgraph.graph import StateGraph, END
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel
+from dotenv import load_dotenv
+from tools_registry import HAS_OPENAI
+
+load_dotenv()
+
+# new agent-plan creation (dynamic)
+from spec import WorkflowSpec
+from generator import generate_spec
+from dynamic_graph import build_graph_from_spec
 
 import sys, os
 from pathlib import Path
@@ -18,6 +27,7 @@ from pathlib import Path
 SRC_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(SRC_ROOT))
 
+# static (milestone 1/2) real-API graph
 from milestone1_sitesourcing_langgraph_real import (
     SGState,
     input_parser,
@@ -28,8 +38,7 @@ from milestone1_sitesourcing_langgraph_real import (
     report_aggregator,
 )
 
-
-app = FastAPI(title="Site Sourcing Agent — Milestone 2", version="1.0")
+app = FastAPI(title="Site Sourcing Agent — Milestones 2/3", version="1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,9 +53,15 @@ app.mount(
     name="ui",
 )
 
+@app.get("/api/health")
+def api_health():
+    return {"has_openai": HAS_OPENAI}
+
 @app.get("/")
 async def root():
     return RedirectResponse(url="/ui")
+
+# ---------------- Connection manager ----------------
 
 class ConnectionManager:
     def __init__(self):
@@ -83,10 +98,75 @@ manager = ConnectionManager()
 def emit(message: dict):
     print("[EMIT]", message)
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
         asyncio.create_task(manager.broadcast(message))
     except RuntimeError:
         asyncio.run(manager.broadcast(message))
+
+# ---------------- Dynamic endpoints (Milestone 3) ----------------
+
+class GeneratePayload(BaseModel):
+    description: str
+
+@app.post("/api/generate")
+def api_generate(payload: GeneratePayload):
+    spec = generate_spec(payload.description)
+    return spec.model_dump()
+
+class ExecuteGeneratedPayload(BaseModel):
+    prompt: str
+    spec: WorkflowSpec
+
+@app.post("/api/execute_generated")
+def api_execute_generated(payload: ExecuteGeneratedPayload):
+    app_graph = build_graph_from_spec(payload.spec)
+    init = {"prompt": payload.prompt, "report_md": None}
+
+    def run():
+        emit({"type": "run_start", "ts": time.time(), "mode": "dynamic-invoke"})
+        report_md = None  # <-- ensure it's defined in this scope
+        try:
+            # Get final state deterministically
+            final_state = app_graph.invoke(init) or {}
+
+            # 1) Prefer report_md set by drafting wrapper
+            report_md = final_state.get("report_md")
+
+            # 2) Fallback: try drafting node's own text
+            if not report_md:
+                drafting = payload.spec.drafting_node
+                draft = final_state.get(drafting)
+                if isinstance(draft, dict) and "text" in draft:
+                    report_md = draft["text"]
+                elif isinstance(draft, str):
+                    report_md = draft
+
+            if not report_md:
+                report_md = "(no report produced)"
+
+            # Collect per-node provenance AFTER we have final_state
+            node_meta = {}
+            for n in payload.spec.nodes:
+                out = final_state.get(n.id)
+                if isinstance(out, dict) and "meta" in out:
+                    node_meta[n.id] = out["meta"]
+
+            emit({
+                "type": "result_final",
+                "report_md": report_md,
+                "meta": node_meta,
+                "ts": time.time()
+            })
+            emit({"type": "run_end", "ts": time.time()})
+
+        except Exception as e:
+            # If anything failed before report_md was set, it still exists (None)
+            emit({"type": "run_error", "error": str(e), "ts": time.time()})
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"status": "started"}
+
+# ---------------- Static endpoints (Milestones 1/2) ----------------
 
 def with_events(name: str, fn):
     def wrapped(state: SGState) -> SGState:
@@ -120,7 +200,6 @@ def build_graph_with_events():
 
 app_graph = build_graph_with_events()
 
-from pydantic import BaseModel
 class ExecutePayload(BaseModel):
     prompt: str
     location: str | None = None
@@ -159,7 +238,7 @@ async def execute(payload: ExecutePayload):
     def run():
         try:
             emit({"type": "run_start", "ts": time.time(), "init": init})
-            final_state = app_graph.invoke(init)
+            _ = app_graph.invoke(init)
             emit({"type": "run_end", "ts": time.time()})
         except Exception as e:
             emit({"type": "run_error", "error": str(e), "ts": time.time()})
