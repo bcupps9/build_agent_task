@@ -2,37 +2,82 @@
   const e = React.createElement;
   const { useEffect, useMemo, useState } = React;
 
-  // ---------- on-page error strip ----------
-  const showErr = (msg) => {
+  // ---------- tiny on-page toast for errors/info ----------
+  const showMsg = (msg, isErr = true) => {
     try {
       const el = document.createElement('div');
       el.style.cssText =
-        'position:fixed;bottom:12px;left:12px;right:12px;background:#1b233a;color:#ffb4b4;border:1px solid #5a2530;padding:8px;border-radius:8px;font:12px/1.4 monospace;z-index:9999;';
-      el.textContent = `[UI Error] ${msg}`;
+        'position:fixed;bottom:12px;left:12px;right:12px;background:#1b233a;color:' +
+        (isErr ? '#ffb4b4' : '#b4ffd2') +
+        ';border:1px solid ' +
+        (isErr ? '#5a2530' : '#295a3a') +
+        ';padding:8px;border-radius:8px;font:12px/1.4 monospace;z-index:9999;';
+      el.textContent = (isErr ? '[UI Error] ' : '[UI] ') + msg;
       document.body.appendChild(el);
-      setTimeout(() => el.remove(), 10000);
-    } catch (_) {}
+      setTimeout(() => el.remove(), 8000);
+    } catch {}
   };
-
-  // catch any unhandled errors
-  window.addEventListener('error', (ev) => showErr(ev?.error?.message || ev?.message || 'Unknown error'));
-  window.addEventListener('unhandledrejection', (ev) => showErr(ev?.reason?.message || String(ev?.reason)));
+  window.addEventListener('error', (ev) => showMsg(ev?.error?.message || ev?.message || 'Unknown error'));
+  window.addEventListener('unhandledrejection', (ev) => showMsg(ev?.reason?.message || String(ev?.reason)));
 
   // ---------- React Flow UMD detection ----------
-  const RF = window.ReactFlow; // provided by /dist/umd/index.min.js
+  const RF = window.ReactFlow;
   const ReactFlowCmp = RF?.ReactFlow || RF?.default || RF;
-  if (!ReactFlowCmp) {
-    showErr('ReactFlow failed to load (window.ReactFlow is undefined). Check the <script> tag src and network tab.');
+  if (!ReactFlowCmp) showMsg('ReactFlow failed to load. Check index.html script tags.');
+
+  // ---------- Dagre auto-layout (top → bottom) ----------
+  function layoutWithDagre(dagJson) {
+    const g = new dagre.graphlib.Graph();
+    g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 70, marginx: 20, marginy: 20 });
+    g.setDefaultEdgeLabel(() => ({}));
+
+    const NODE_W = 230, NODE_H = 120;
+
+    (dagJson.nodes || []).forEach((n) => {
+      g.setNode(n.id, { width: NODE_W, height: NODE_H, label: n.label, tasks: n.tasks || [] });
+    });
+    (dagJson.edges || []).forEach(([s, t]) => g.setEdge(s, t));
+
+    dagre.layout(g);
+
+    const nodes = (dagJson.nodes || []).map((n) => {
+      const p = g.node(n.id);
+      return {
+        id: n.id,
+        position: { x: p.x - NODE_W / 2, y: p.y - NODE_H / 2 },
+        data: { label: n.label, tasks: n.tasks || [], status: 'idle' },
+        type: 'default',
+      };
+    });
+
+    const edges = (dagJson.edges || []).map(([s, t], i) => ({
+      id: `${s}-${t}-${i}`,
+      source: s,
+      target: t,
+      type: 'smoothstep',
+      animated: false,
+    }));
+
+    return { nodes, edges };
   }
 
+  // ---------- Node renderer with status badge ----------
   function DagCard({ nodes, edges }) {
     const nodeTypes = useMemo(() => ({
-      default: ({ data }) =>
-        e('div', { className: 'card', style: { width: 220, padding: 10 } },
-          e('div', { className: 'hdr' }, e('h2', null, data.label || 'Node')),
+      default: ({ data }) => {
+        const color =
+          data.status === 'running' ? '#f0ad4e' :
+          data.status === 'done'    ? '#28a745' :
+                                      '#6c757d';
+        return e('div', { className: 'card', style: { width: 230, padding: 10, borderColor: color } },
+          e('div', { className: 'hdr', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+            e('h2', null, data.label || 'Node'),
+            e('span', { className: 'badge', style: { background: color } }, data.status || 'idle')
+          ),
           !!data.tasks && e('div', { className: 'small' }, 'Tasks'),
           !!data.tasks && e('ul', { className: 'small' }, data.tasks.map((t, i) => e('li', { key: i }, '• ', t)))
-        ),
+        );
+      },
     }), []);
 
     return e('div', { className: 'card rf-card' },
@@ -43,14 +88,14 @@
     );
   }
 
-  function ControlCard({ onExecute }) {
+  // ---------- Control Panel ----------
+  function ControlCard({ onStarted }) {
     const [prompt, setPrompt] = useState('Find industrial sites near Phoenix, AZ');
     const [location, setLocation] = useState('Phoenix, AZ');
     const [maxCand, setMaxCand] = useState(8);
     const [running, setRunning] = useState(false);
 
     const doRun = async () => {
-      try { console.log('[UI] Execute clicked'); } catch {}
       try {
         setRunning(true);
         const res = await fetch('/api/execute', {
@@ -59,27 +104,22 @@
           body: JSON.stringify({ prompt, location, max_candidates: Number(maxCand) })
         });
         if (!res.ok) {
-          const txt = await res.text().catch(()=> '');
+          const txt = await res.text().catch(() => '');
           throw new Error(`POST /api/execute ${res.status} ${txt}`);
         }
-        showErr('✔ queued run');               // quick visual confirmation
-
-        onExecute && onExecute();
+        showMsg('✔ queued run', false);
+        onStarted && onStarted();
       } catch (err) {
-        showErr(err?.message || String(err));
+        showMsg(err?.message || String(err));
       } finally {
         setRunning(false);
       }
     };
 
     return e('div', { className: 'card' },
-      e('div', { className: 'hdr' }, e('h2', null, 'Control Panel'),
-        e('button', {
-            type: 'button',                    // ← ensure not a form submit
-            className:'btn',
-            onClick: doRun,
-            disabled: running
-          }, 'Execute')
+      e('div', { className: 'hdr' },
+        e('h2', null, 'Control Panel'),
+        e('button', { type: 'button', className: 'btn', onClick: doRun, disabled: running }, 'Execute')
       ),
       e('div', { className: 'grid2' },
         e('div', null,
@@ -95,31 +135,14 @@
       )
     );
   }
-  
-  function StatusCard() {
-    const [status, setStatus] = useState({});
-    useEffect(() => {
-      const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-      const ws = new WebSocket(proto + location.host + '/ws');
-      ws.onmessage = (evt) => {
-        try {
-          const msg = JSON.parse(evt.data);
-          if (msg.type === 'node_start') setStatus(s => ({ ...s, [msg.node]: 'running' }));
-          if (msg.type === 'node_end') setStatus(s => ({ ...s, [msg.node]: 'done' }));
-          if (msg.type === 'run_start') setStatus({});
-        } catch (e) {
-          showErr('WS parse: ' + (e?.message || String(e)));
-        }
-      };
-      ws.onerror = () => showErr('WebSocket error');
-      return () => { try { ws.close(); } catch { } };
-    }, []);
 
-    const nodes = ['input_parser', 'ideation', 'zoning_ranker', 'infra_ranker', 'labor_ranker', 'report'];
+  // ---------- Badges row ----------
+  function Badges({ status }) {
+    const order = ['input_parser', 'ideation', 'zoning_ranker', 'infra_ranker', 'labor_ranker', 'report'];
     return e('div', { className: 'card' },
       e('div', { className: 'hdr' }, e('h2', null, 'Execution Status')),
       e('div', { className: 'flex' },
-        nodes.map(n => {
+        order.map((n) => {
           const s = status[n] || 'idle';
           const cls = s === 'running' ? 'badge run' : (s === 'done' ? 'badge done' : 'badge idle');
           return e('div', { key: n, className: cls }, n);
@@ -128,69 +151,59 @@
     );
   }
 
-  function ResultsCard() {
+  // ---------- App (fetch DAG, WS stream, color nodes, animate edges) ----------
+  function App() {
+    const [nodes, setNodes] = useState([]);
+    const [edges, setEdges] = useState([]);
+    const [status, setStatus] = useState({});
     const [report, setReport] = useState('');
+
+    // fetch DAG once
+    useEffect(() => {
+      fetch('/api/dag')
+        .then((r) => { if (!r.ok) throw new Error('GET /api/dag ' + r.status); return r.json(); })
+        .then((d) => {
+          const laid = layoutWithDagre(d);
+          setNodes(laid.nodes);
+          setEdges(laid.edges);
+        })
+        .catch((err) => showMsg(err?.message || String(err)));
+    }, []);
+
+    // single WS for everything
     useEffect(() => {
       const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
       const ws = new WebSocket(proto + location.host + '/ws');
       ws.onmessage = (evt) => {
         try {
           const msg = JSON.parse(evt.data);
+          if (msg.type === 'run_start') {
+            setStatus({});
+            setReport('');
+            setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, status: 'idle' } })));
+            setEdges((es) => es.map((ed) => ({ ...ed, animated: false })));
+          }
+          if (msg.type === 'node_start') {
+            setStatus((s) => ({ ...s, [msg.node]: 'running' }));
+            setNodes((ns) => ns.map((n) => (n.id === msg.node ? { ...n, data: { ...n.data, status: 'running' } } : n)));
+            setEdges((es) => es.map((ed) => (ed.source === msg.node ? { ...ed, animated: true } : ed)));
+          }
+          if (msg.type === 'node_end') {
+            setStatus((s) => ({ ...s, [msg.node]: 'done' }));
+            setNodes((ns) => ns.map((n) => (n.id === msg.node ? { ...n, data: { ...n.data, status: 'done' } } : n)));
+            setEdges((es) => es.map((ed) => (ed.source === msg.node ? { ...ed, animated: false } : ed)));
+          }
           if (msg.type === 'result') setReport(msg.report_md || '');
-          if (msg.type === 'run_error') setReport('ERROR: ' + (msg.error || 'unknown'));
+          if (msg.type === 'run_error') {
+            setReport('ERROR: ' + (msg.error || 'unknown'));
+            showMsg(msg.error || 'run error');
+          }
         } catch (e) {
-          showErr('WS parse: ' + (e?.message || String(e)));
+          showMsg('WS parse: ' + (e?.message || String(e)));
         }
       };
-      return () => { try { ws.close(); } catch { } };
-    }, []);
-    return e('div', { className: 'card' },
-      e('div', { className: 'hdr' }, e('h2', null, 'Results')),
-      report ? e('pre', null, report) : e('div', { className: 'small' }, 'Run the workflow to see results...')
-    );
-  }
-
-  function BootCheck() {
-    return e('div', { className: 'card' },
-      e('div', { className: 'hdr' }, e('h2', null, 'Boot Check')),
-      e('div', { className: 'small' },
-        `React: ${!!window.React}, ReactDOM: ${!!window.ReactDOM}, ReactFlow: ${!!window.ReactFlow}`
-      )
-    );
-  }
-
-  function App() {
-    const [nodes, setNodes] = useState([]);
-    const [edges, setEdges] = useState([]);
-
-    // Minimal placeholder DAG so you SEE something even if /api/dag fails
-    useEffect(() => {
-      // placeholder
-      const pNodes = [
-        { id: 'a', position: { x: 80, y: 60 }, data: { label: 'Placeholder A', tasks: ['Loading DAG...'] } },
-        { id: 'b', position: { x: 320, y: 220 }, data: { label: 'Placeholder B', tasks: ['Loading DAG...'] } },
-      ];
-      const pEdges = [{ id: 'a-b', source: 'a', target: 'b' }];
-      setNodes(pNodes);
-      setEdges(pEdges);
-
-      // real DAG
-      fetch('/api/dag')
-        .then(r => {
-          if (!r.ok) throw new Error('GET /api/dag ' + r.status);
-          return r.json();
-        })
-        .then(d => {
-          const n = (d.nodes || []).map((node, idx) => ({
-            id: node.id,
-            position: { x: 80 + 220 * (idx % 3), y: 60 + 160 * Math.floor(idx / 3) },
-            data: { label: node.label, tasks: node.tasks || [] }
-          }));
-          const egs = (d.edges || []).map(([s, t]) => ({ id: s + '-' + t, source: s, target: t }));
-          setNodes(n);
-          setEdges(egs);
-        })
-        .catch(err => showErr(err?.message || String(err)));
+      ws.onerror = () => showMsg('WebSocket error');
+      return () => { try { ws.close(); } catch {} };
     }, []);
 
     return e(React.Fragment, null,
@@ -200,10 +213,18 @@
       ),
       e(DagCard, { nodes, edges }),
       e('div', null,
-        e(ControlCard, null),
-        e(StatusCard, null),
-        e(ResultsCard, null),
-        e(BootCheck, null)
+        e(ControlCard, { onStarted: () => {} }),
+        e(Badges, { status }),
+        e('div', { className: 'card' },
+          e('div', { className: 'hdr' }, e('h2', null, 'Results')),
+          report ? e('pre', null, report) : e('div', { className: 'small' }, 'Run the workflow to see results...')
+        )
+      ),
+      e('div', { className: 'card' },
+        e('div', { className: 'hdr' }, e('h2', null, 'Boot Check')),
+        e('div', { className: 'small' },
+          `React: ${!!window.React}, ReactDOM: ${!!window.ReactDOM}, ReactFlow: ${!!window.ReactFlow}`
+        )
       )
     );
   }
